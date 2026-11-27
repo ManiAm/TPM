@@ -22,7 +22,15 @@ Before running any TPM commands, you need access to a TPM 2.0. There are three p
 
 If you want to use a real TPM instead of (or in addition to) the software emulator, the first step is verifying that one is present and accessible.
 
-### Linux (bare-metal)
+| # | Platform | TPM type | What is covered |
+| --- | --- | --- | --- |
+| 1 | [Linux (bare-metal)](#1-linux-bare-metal) | Firmware TPM (fTPM) or discrete chip | Check device nodes and kernel detection |
+| 2 | [Raspberry Pi](#2-raspberry-pi-discrete-tpm) | Discrete TPM via GPIO (SPI/I²C) | Hardware setup, Device Tree overlay, verification |
+| 3 | [Linux VM with vTPM](#3-linux-vm-with-vtpm) | Virtual TPM provided by hypervisor | Hypervisor-specific configuration |
+| 4 | [Windows](#4-windows) | Firmware TPM or discrete chip | PowerShell `Get-Tpm` and `tpm.msc` |
+| 5 | [WSL2](#5-wsl2) | None (TPM not exposed) | Workarounds and limitations |
+
+### 1. Linux (bare-metal)
 
 The Linux kernel exposes a detected TPM through two device nodes:
 
@@ -51,7 +59,7 @@ systemd-analyze has-tpm2
 
 If `/dev/tpm0` does not exist, the TPM may be disabled in the BIOS/UEFI firmware settings. Look for a setting labeled "TPM", "Security Device", "Intel PTT" (for Intel firmware TPMs), or "AMD fTPM" (for AMD firmware TPMs) and enable it.
 
-### Raspberry Pi (discrete TPM)
+### 2. Raspberry Pi (discrete TPM)
 
 Raspberry Pi boards do not include a built-in TPM. However, a discrete TPM 2.0 chip can be added via an external module that connects to the 40-pin GPIO header. Depending on the chip, communication uses the SPI or I²C bus (see [Host interface](01-TPM-intro.md#5-host-interface)).
 
@@ -123,7 +131,7 @@ sudo dmesg | grep -i tpm
 
 If `/dev/tpm0` does not appear, double-check the overlay name in `config.txt`, confirm the module is seated correctly on the GPIO header, and review `dmesg` output for driver errors.
 
-### Linux VM with vTPM
+### 3. Linux VM with vTPM
 
 A virtual TPM (vTPM) is presented to the guest by the hypervisor. From inside the guest, it looks and behaves exactly like a hardware TPM — the same `/dev/tpm0` and `/dev/tpmrm0` device nodes appear, and all the same commands work.
 
@@ -146,7 +154,7 @@ cat /sys/class/tpm/tpm0/tpm_version_major
 
 If the device nodes do not appear, confirm that the vTPM was added in the hypervisor settings and that the guest kernel has TPM driver support (`CONFIG_TCG_TPM`, `CONFIG_TCG_TIS`, or `CONFIG_TCG_CRB` enabled).
 
-### Windows
+### 4. Windows
 
 Windows provides two built-in methods:
 
@@ -188,7 +196,7 @@ Press `Win + R`, type `tpm.msc`, and press Enter. This graphical tool shows whet
 
 <img src="../pics/tpm-windows.png" alt="segment" width="900">
 
-### WSL2
+### 5. WSL2
 
 **WSL2 does not expose the host's hardware TPM.** The WSL2 Linux kernel is compiled without TPM driver support (`CONFIG_TCG_TPM` is not set), so no `/dev/tpm0` or `/dev/tpmrm0` device nodes are created — even if the Windows host has a hardware TPM.
 

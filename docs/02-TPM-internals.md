@@ -150,13 +150,13 @@ These attributes combine to define the key's behavior. For example:
 
 The generation methods above (primary and ordinary) describe *how* a key is created. The roles below describe *what* a key is used for. Any role can be either primary or ordinary, depending on the use case.
 
-- **Endorsement Key (EK):** A primary key derived from the Endorsement hierarchy seed. It serves as the TPM's hardware-bound identity. A manufacturer may provision an EK certificate — a signed statement that says "this key belongs to a genuine TPM" — to vouch for the TPM's authenticity. The EK is generally not used for direct signing. Its primary role is **credential activation**: a protocol where a remote party encrypts a secret to the EK, and only the TPM holding that EK can recover it — proving the TPM is genuine.
+- **Endorsement Key (EK):** A primary key derived from the Endorsement hierarchy seed. It serves as the TPM's hardware-bound identity. A manufacturer may provision an EK certificate — a signed statement that says "this key belongs to a genuine TPM" — to vouch for the TPM's authenticity. The EK is a restricted decryption key (making it a storage key that can wrap child keys, such as an [Attestation Key](#remote-attestation)), but it cannot sign. Its primary role is **credential activation**: a protocol where a remote party encrypts a secret to the EK, and only the TPM holding that EK can recover it — proving the TPM is genuine (see [Enrollment](#enrollment-one-time-setup)).
 
 - **Storage Parent Key:** A primary key derived from the Storage hierarchy seed. It protects (wraps) child keys and sealed data — think of it as a folder that encrypts everything inside it. Other keys and secrets are created as ordinary (child) keys under a storage parent, forming a tree.
 
    > This is the TPM 2.0 equivalent of the TPM 1.2 [Storage Root Key (SRK)](#tpm-12-single-hierarchy), but the TPM 2.0 specification does not use the term "SRK." Unlike the SRK, which was a single fixed RSA-2048 key, TPM 2.0 allows multiple primary storage keys per hierarchy with different algorithms (RSA or ECC). In practice, industry profiles such as the TCG PC Client Platform TPM Profile define default primary key templates for interoperability, and these are still informally called "SRKs."
 
-- **Attestation Key (AK):** Typically an ordinary (child) key that signs TPM-generated attestation statements — reports of the platform's boot measurements (covered in [PCRs](#platform-configuration-registers-pcrs) and [Remote Attestation](#remote-attestation)). An AK is commonly created under the Endorsement hierarchy, but it can also be created under the Storage hierarchy. Credential activation (`TPM2_ActivateCredential`) establishes a cryptographic link between an AK and an EK, proving the AK resides on a genuine TPM. This is the TPM 2.0 equivalent of TPM 1.2's AIK, but with more flexible creation and authorization.
+- **Attestation Key (AK):** A restricted signing key that signs TPM-generated attestation statements such as PCR quotes (covered in [PCRs](#platform-configuration-registers-pcrs) and [Remote Attestation](#remote-attestation)). An AK is commonly created as a child of the EK in the Endorsement hierarchy (using `tpm2_createak`), but it can also be created under a storage parent in the Storage hierarchy. Credential activation (`TPM2_ActivateCredential`) establishes a cryptographic link between an AK and an EK, proving the AK resides on a genuine TPM (see [Enrollment](#enrollment-one-time-setup)). This is the TPM 2.0 equivalent of TPM 1.2's AIK, but with more flexible creation and authorization.
 
 - **Application key:** Typically an ordinary (child) key created for a specific purpose — signing documents, authenticating a device, or protecting application data. Can use RSA or ECC, depending on what the application needs.
 
@@ -314,13 +314,28 @@ The process involves two roles:
 
 - **Verifier** — the party requesting proof. This is typically a remote server, network gateway, or management service that decides whether to trust the attestor — for example, before granting network access, issuing a certificate, or allowing a VPN connection.
 
-<img src="../pics/remote_attestation.png" alt="Remote attestation sequence diagram" width="600">
+### Enrollment (one-time setup)
 
-A typical PCR-based remote attestation workflow:
+Before the first attestation, the verifier must establish that the attestor's Attestation Key (AK) resides on a genuine TPM. This is done through **credential activation**:
+
+1. The attestor sends its **EK certificate** and the **AK public area** to the verifier.
+2. The verifier validates the EK certificate against the TPM manufacturer's trust chain, then calls `TPM2_MakeCredential` — encrypting a secret to the EK public key and binding it to the AK's Name.
+3. The attestor calls `TPM2_ActivateCredential` with both the **EK** and the **AK** loaded. The TPM decrypts the secret using the EK and verifies the AK's Name matches. Only a TPM that holds both keys can recover the secret.
+4. The attestor returns the secret to the verifier, proving the AK is TPM-resident. The verifier may then issue an **AK certificate** for future use.
+
+<img src="../pics/enrollment-workflow.png" alt="Remote attestation sequence diagram" width="800">
+
+This enrollment ceremony needs to happen only once per AK. After it completes, the verifier trusts that quotes signed by this AK come from a genuine TPM.
+
+### Quote workflow (each attestation)
+
+Once the AK is enrolled, the actual attestation uses only the AK — the EK is no longer needed:
+
+<img src="../pics/qoute-workflow.png" alt="Remote attestation sequence diagram" width="600">
 
 1. The **verifier** sends a **challenge** to the **attestor**, specifying a fresh random **nonce**, which **PCRs** to include, and a **key identifier** for the attestation key to use.
 
-2. The attestor loads the **Endorsement Key (EK)** and the **Attestation Key (AK)** into the TPM.
+2. The attestor loads the **Attestation Key (AK)** into the TPM (if not already loaded).
 
 3. The attestor asks the TPM to produce a **quote** using `TPM2_Quote`, specifying the AK, the selected PCRs, and the nonce.
 
@@ -329,10 +344,9 @@ A typical PCR-based remote attestation workflow:
 5. The attestor returns the signed quote, along with supporting evidence such as individual PCR values and the firmware/OS-maintained boot **event log**, to the verifier. The event log is maintained by software outside the TPM; the quote's signature covers the PCR digest and nonce, not the event log itself.
 
 6. The verifier performs **appraisal** by checking:
-   - **AK trust.** The AK traces back to a genuine TPM — typically established beforehand through an enrollment ceremony using `TPM2_ActivateCredential` and the EK certificate chain. The verifier should also validate the AK's public attributes to confirm it is an appropriately configured TPM-protected attestation key.
-   - **Signature validity.** The quote's signature verifies under the trusted AK.
+   - **Signature validity.** The quote's signature verifies under the trusted AK (whose trust was established during enrollment).
    - **Freshness.** The nonce matches, proving the response is not replayed from an earlier session.
-   - **Event-log integrity.** The verifier replays the event-log entries, computes the expected PCR values independently, and checks whether a digest of those values matches the PCR digest inside the signed quote. This confirms the measurement digests are consistent — it does not necessarily authenticate every descriptive metadata field in the event log.
+   - **Event-log integrity.** The verifier replays the event-log entries, computes the expected PCR values independently, and checks whether a digest of those values matches the PCR digest inside the signed quote.
    - **Policy evaluation.** The verifier evaluates the measurements against trusted reference values and acceptance policies, rather than necessarily requiring one fixed boot sequence.
 
 The nonce prevents replay — an attacker cannot save an old quote and send it again, because the nonce will be different each time.

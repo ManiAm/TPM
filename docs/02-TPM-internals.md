@@ -1,6 +1,6 @@
 # TPM Internals
 
-This document is a companion to [TPM](01-TPM-intro.md). It covers the internal mechanisms of the Trusted Platform Module in detail — how keys are organized and generated, how boot measurements work, how secrets are protected through sealing and binding, and how remote attestation works.
+This document is a companion to [TPM](01-TPM-intro.md). It covers the internal mechanisms of the Trusted Platform Module in detail — how keys are organized and generated, how Platform Configuration Registers record platform state, how secrets are protected through sealing and binding, and how remote attestation works.
 
 
 ## Key Hierarchies
@@ -195,51 +195,53 @@ The kernel resource manager (`/dev/tpmrm0`) and the `tpm2-abrmd` daemon automate
 
 ## Platform Configuration Registers (PCRs)
 
-Platform Configuration Registers (PCRs) are special-purpose registers inside the TPM that record what software ran during the boot process. Think of them as a tamper-evident logbook: each boot stage writes an entry, and no one can erase or alter previous entries. If anything in the boot sequence changes — a firmware update, a different bootloader, or a rootkit — the PCR values change too.
+Platform Configuration Registers (PCRs) are special-purpose registers inside the TPM. Each PCR holds a single **digest** (hash value) that can only be modified through an **extend** operation — software cannot directly write an arbitrary value. Think of them as a tamper-evident logbook: software appends entries, and no one can erase or alter previous entries.
+
+PCRs are a general-purpose mechanism — any software can extend a PCR at any time with a new digest. Their primary use is [integrity measurement](#integrity-measurement): recording what software ran and what configuration was present so that other TPM features (such as [sealing](#sealing) and [remote attestation](#remote-attestation)) can act on that record.
 
 > **Note:** The TCG specification allows different physical implementations of PCR storage, but the PC Client Platform TPM Profile recommends RAM because PCRs may be updated frequently during a boot cycle.
 
-A TPM typically has **24 PCRs** (indices 0–23), each holding a single hash value. The TPM maintains a separate set of 24 PCRs for each supported hash algorithm — called a **PCR bank** (for example, a SHA-256 bank and a SHA-384 bank).
+A TPM typically has **24 PCRs** (indices 0–23). The TPM maintains a separate set of 24 PCRs for each supported hash algorithm — called a **PCR bank** (for example, a SHA-256 bank and a SHA-384 bank).
 
 <img src="../pics/PCR-Bank.png" alt="segment" width="550">
 
 When a system starts or restarts, the TPM must decide what to do with its PCR values. The behavior depends on the type of startup:
 
-| TPM operation | PCR behavior |
-| --- | --- |
-| **TPM Reset** | All PCRs reinitialized to their default values |
+| TPM operation   | PCR behavior |
+| --------------- | ------------ |
+| **TPM Reset**   | All PCRs reinitialized to their default values |
 | **TPM Restart** | All PCRs reinitialized to their default values |
-| **TPM Resume** | Designated PCR values (PCRs 0–15) restored from saved state; other PCRs reinitialized |
+| **TPM Resume**  | Designated PCR values (PCRs 0–15) restored from saved state; other PCRs reinitialized |
 
 According to the TCG PC Client Platform TPM Profile, the default initial values on `Startup(CLEAR)` are:
 
-| PCR | Initial value |
-| --- | --- |
-| 0 | Startup locality indicator or hardware measurement sequence result |
+| PCR      | Initial value |
+| -------- | ------------- |
+| 0        | Startup locality indicator or hardware measurement sequence result |
 | 1–16, 23 | All zeros (0x00…00) |
-| 17–22 | All ones (0xFF…FF) — reserved for Dynamic Root of Trust for Measurement (D-RTM) |
+| 17–22    | All ones (0xFF…FF) — reserved for Dynamic Root of Trust for Measurement (D-RTM) |
 
 ### How extend works
 
-Software cannot directly overwrite a PCR with an arbitrary value — it can only **extend** it. Extending means: take the register's current value, append the new measurement, and hash them together to produce a new value:
+Software cannot directly overwrite a PCR with an arbitrary value — it can only **extend** it. Extending means: take the register's current digest, concatenate the new digest, and hash them together to produce a new value:
 
 ```
-PCR_new = Hash( PCR_old || measurement_digest )
+PCR_new = Hash( PCR_old || new_digest )
 ```
 
-Where `||` means concatenation. In plain terms: the TPM takes the existing PCR value, appends the new measurement digest, and hashes the combined result. The output becomes the new PCR value.
+Where `||` means concatenation. In plain terms: the TPM takes the existing PCR digest, appends the new digest, and hashes the combined result. The output becomes the new PCR value.
 
-This makes each PCR a **one-way accumulator**. You cannot undo an extend, and you cannot skip to a desired value. Each extend changes the register in a way that reflects the complete, ordered history of everything that was measured into it. Swapping the order of two measurements produces a different final PCR value — so the result captures not just *what* was measured, but *in what order*.
+This makes each PCR a **one-way accumulator**. You cannot undo an extend, and you cannot skip to a desired value. Each extend changes the register in a way that reflects the complete, ordered history of every digest extended into it. Swapping the order of two extends produces a different final PCR value — so the result captures not just *what* was extended, but *in what order*.
 
 Certain PCRs (such as PCR 16 and PCR 23 on PC Client platforms) also support reset operations under conditions defined by the platform specification.
 
-### What gets measured into which PCR
+### PCR assignment
 
-The assignment of PCRs depends on the platform specification. The general pattern is: lower-numbered PCRs (0–7) record firmware and boot infrastructure, middle PCRs (8–15) are for OS use, and higher PCRs (16–23) serve special purposes such as debugging, dynamic trust establishment, and application-specific measurements.
+Which PCR index is used for what depends on the platform specification. The general pattern is: lower-numbered PCRs (0–7) are reserved for firmware and boot infrastructure, middle PCRs (8–15) are for OS use, and higher PCRs (16–23) serve special purposes such as debugging, dynamic trust establishment, and application-defined use.
 
 For a typical **TCG PC Client** platform:
 
-| PCR | What is typically measured |
+| PCR | What is typically extended into it |
 | --- | --- |
 | 0 | CRTM and platform firmware code |
 | 1 | Platform firmware configuration |
@@ -247,70 +249,74 @@ For a typical **TCG PC Client** platform:
 | 3 | External firmware configuration and data |
 | 4 | Boot manager code and boot attempts |
 | 5 | Boot configuration and GPT partition information |
-| 6 | Host platform manufacturer-specific measurements |
+| 6 | Host platform manufacturer-specific digests |
 | 7 | Secure Boot policy and verification authorities |
-| 8–15 | Static OS-defined measurements (exact use depends on OS and bootloader) |
+| 8–15 | Static OS-defined digests (exact use depends on OS and bootloader) |
 | 16 | Debug and test (resettable) |
 | 17 | D-RTM, locality 4 |
 | 18 | D-RTM, locality 3 |
 | 19 | D-RTM, locality 2 |
 | 20 | D-RTM, locality 1 |
-| 21–22 | Dynamic OS-controlled measurements |
-| 23 | Application-specific measurements |
+| 21–22 | Dynamic OS-controlled digests |
+| 23 | Application-specific digests |
 
-### Measurement chain
+### Integrity Measurement
 
-The TPM does not independently inspect the platform's boot components — it is a passive recorder, not an inspector. It has no way to read firmware off a flash chip or examine the bootloader. Instead, each boot stage is responsible for measuring the next stage and sending those measurements to the TPM via commands such as `TPM2_PCR_Extend` and `TPM2_PCR_Event` (the latter allows the TPM to hash the event data internally).
+The primary use of PCRs is **integrity measurement** — the process of hashing platform components and extending those digests into PCRs to build a cryptographic record of platform state. The TPM accumulates digests but does not judge them — whether a given digest represents "good" or "bad" software is determined later by a verifier or a sealing policy, not by the TPM itself.
+
+Integrity measurement can happen at different stages:
+
+- **Boot time** — firmware, bootloaders, and OS kernels are measured into PCRs 0–7 during startup. This is called **measured boot**.
+- **Runtime** — Linux's Integrity Measurement Architecture (IMA) measures files into PCR 10 as they are accessed.
+- **Application-defined** — applications can extend PCR 23 with their own digests for custom integrity tracking.
+
+Because each PCR is a one-way accumulator, any change to a measured component produces a different final digest. If a rootkit replaces the bootloader or a firmware update changes code, the affected PCRs will not match expected values — making tampering detectable by any consumer of PCR values (such as a sealing policy or a remote verifier).
+
+#### Measured boot
+
+During startup, each boot stage is responsible for hashing the next stage and extending that digest into the TPM before transferring execution. The TPM does not independently inspect anything — it is a passive recorder, not an inspector. It has no way to read firmware off a flash chip or examine the bootloader. It simply accepts the digests it is given via commands such as `TPM2_PCR_Extend` and `TPM2_PCR_Event` (the latter allows the TPM to hash the event data internally).
 
 This creates a chain of measurements, and every chain needs a trusted starting point. In a **Static Root of Trust for Measurement (S-RTM)**, that starting point is the **Core Root of Trust for Measurement (CRTM)** — typically the very first code that executes when the platform powers on. The CRTM must be protected against unauthorized modification and may be implemented using immutable code, securely updatable firmware, or hardware-assisted mechanisms.
 
-From there, each subsequent boot stage (bootloader, OS kernel, drivers) measures the next stage before transferring execution. The TPM accumulates these measurements in its PCRs, building up a cryptographic record of the entire boot sequence.
+From there, each subsequent boot stage (bootloader, OS kernel, drivers) measures the next stage before transferring execution. The TPM accumulates these digests in PCRs 0–7, building up a cryptographic record of the entire boot sequence.
 
 <img src="../pics/2026-11-24_17-03-02.png" alt="Simplified static chain of measurement" width="550">
 
-### Event log
+#### Event log
 
-The PCR itself does not explain *what* was measured — it only holds a cumulative hash value. A separate **event log**, maintained by firmware and OS software outside the TPM, records the details: which file was measured, which configuration was checked, and what hash was produced. A verifier replays the event log entries, recomputes the expected PCR values, and checks them against the actual PCR values to confirm consistency.
+The PCR itself does not explain *what* was extended into it — it only holds a cumulative digest. A separate **event log**, maintained by firmware and OS software outside the TPM, records the details: which component was measured, which configuration was checked, and what digest was produced. A verifier replays the event log entries, recomputes the expected PCR values, and checks them against the actual PCR values to confirm consistency.
 
-### Why PCRs matter
-
-- **Sealing:** A disk-encryption key can be sealed to expected PCR values. If changes to firmware or the bootloader affect the PCRs selected by the sealing policy, the TPM refuses to release the key.
-
-- **Attestation:** A remote server can request a signed TPM **quote** — a TPM-signed snapshot of selected PCR values — and compare them against a known-good policy (see [Remote Attestation](#remote-attestation) for the full workflow).
-
-- **Tamper detection:** Changes to measured boot components or security-relevant configuration normally result in different PCR values. Detection depends on the coverage and integrity of the measurement chain — PCRs cannot detect unmeasured components or runtime modifications that occur after measurements are taken.
-
-## Sealing and Binding
-
-The TPM uses two related operations to protect secrets. Both rely on the cryptographic hardware, key hierarchies, and PCRs described above.
-
-### Sealing
+## Sealing
 
 **Sealing** protects a secret within a TPM-managed object and associates authorization requirements with its release. The sealed object may be stored outside the TPM as an encrypted, integrity-protected blob. When requested, the TPM releases the secret only if the object's authorization requirements are satisfied.
 
-Think of it as putting a note in a safe that only opens when the right combination of factors is present — for example, the machine booted the expected firmware *and* the correct PIN was entered. If anything in that combination changes, the safe stays locked. Sealing commonly uses PCR-based policies, but TPM 2.0 also supports other authorization mechanisms (passwords, complex compound policies).
+Think of it as putting a note in a safe that only opens when the right combination of factors is present — for example, the correct PIN was entered, or a specific policy is satisfied. If the authorization requirements are not met, the safe stays locked. TPM 2.0 supports several types of authorization: passwords, policy sessions, and compound policies that combine multiple conditions.
 
-For example, full-disk encryption tools like BitLocker seal the disk-encryption key to expected PCR values (as described in [How TPM Is Used in Practice](01-TPM-intro.md#how-tpm-is-used-in-practice)). If the boot measurements change — because of a firmware update or tampering — the TPM refuses to unseal the key, and the drive stays locked.
+Sealing is commonly combined with a PCR-based policy — the TPM releases the secret only when the current [PCR](#platform-configuration-registers-pcrs) digests match the values specified at seal time. For example, full-disk encryption tools like BitLocker seal the disk-encryption key to expected PCR values. If the boot digests change — because of a firmware update or tampering — the TPM refuses to unseal the key, and the drive stays locked. PCR-based sealing is optional — a sealed object can use password-only or other authorization instead.
 
-### Binding
+## Binding
 
 **Binding** encrypts data with a TPM key so that only that specific TPM can decrypt it — provided the decryption key is non-migratable and has not been made available elsewhere. You can copy the encrypted blob to a USB drive, upload it to the cloud, or email it — it is useless without the TPM that holds the binding key. It is like locking a file with a key that physically cannot leave the building.
 
-In TPM 2.0, decryption keys can themselves have PCR-based authorization policies, blurring the line between binding and sealing. The distinction is clearest in TPM 1.2, which provides separate commands (`TPM_UnBind` vs. `TPM_Seal`/`TPM_Unseal`).
+In TPM 2.0, the decryption key used for binding can have a PCR-based authorization policy attached to it, so the TPM only decrypts when the platform is in an expected state. This blurs the line between binding and sealing. The distinction is clearest in TPM 1.2, which provides separate commands (`TPM_UnBind` vs. `TPM_Seal`/`TPM_Unseal`).
 
-In short: **sealing** protects a secret inside a TPM-managed object with authorization requirements (commonly including PCR-based policies). **Binding** ties encrypted data to a specific TPM through a non-migratable decryption key. In TPM 2.0, flexible authorization policies make the distinction less rigid than in TPM 1.2.
+In short: **sealing** protects a secret inside a TPM-managed object with authorization requirements. **Binding** ties encrypted data to a specific TPM through a non-migratable decryption key. In TPM 2.0, flexible authorization policies (including PCR-based ones) make the distinction less rigid than in TPM 1.2.
 
 ## Remote Attestation
 
-**Attestation** lets a device prove to a remote party what state it is in. It combines PCR measurements and the TPM's signing capability into one signed statement. The process involves two roles:
+**Attestation** lets a device prove to a remote party what state it is in. The TPM can sign statements about its internal state — key properties, clock values, or creation metadata — using attestation commands such as `TPM2_Certify`, `TPM2_GetTime`, and `TPM2_CertifyCreation`.
 
-- **Attestor** — the device being verified. This is typically a laptop, server, IoT device, or any platform equipped with a TPM. The attestor's software coordinates with its local TPM to produce evidence of the platform's boot state.
+The most common form of attestation is a **PCR quote** (`TPM2_Quote`), which signs selected [PCR](#platform-configuration-registers-pcrs) values so a remote verifier can evaluate the platform's integrity measurements. The rest of this section describes this PCR-based attestation workflow.
+
+The process involves two roles:
+
+- **Attestor** — the device being verified. This is typically a laptop, server, IoT device, or any platform equipped with a TPM. The attestor's software coordinates with its local TPM to produce evidence of the platform's state.
 
 - **Verifier** — the party requesting proof. This is typically a remote server, network gateway, or management service that decides whether to trust the attestor — for example, before granting network access, issuing a certificate, or allowing a VPN connection.
 
 <img src="../pics/remote_attestation.png" alt="Remote attestation sequence diagram" width="600">
 
-A typical remote attestation workflow:
+A typical PCR-based remote attestation workflow:
 
 1. The **verifier** sends a **challenge** to the **attestor**, specifying a fresh random **nonce**, which **PCRs** to include, and a **key identifier** for the attestation key to use.
 

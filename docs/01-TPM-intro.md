@@ -320,9 +320,11 @@ Instead of relying on a password that could be stolen or reused, the TPM can hol
 
 ### Measured boot and device health
 
-During measured boot, the measurement chain starts with a **Core Root of Trust for Measurement (CRTM)** — typically the first code that executes on the platform. Each boot stage calculates cryptographic measurements of the next stage and extends them into the TPM's PCRs. The TPM itself does not inspect the boot components — it receives and accumulates measurements from the measuring software.
+During startup, each stage of the boot process records a cryptographic fingerprint of the next stage into the TPM's Platform Configuration Registers (PCRs). This creates a tamper-evident record of everything that ran — if any component changes, the recorded values change too.
 
-The TPM can then use an Attestation Key (AK) to produce a signed report of the accumulated measurements, which a verifier evaluates using the corresponding event log and expected platform state. Enterprise systems use this to verify device health before granting network access or issuing certificates. Measured boot provides evidence — it does not by itself prevent untrusted software from executing.
+Enterprise systems use this record to verify device health before granting network access or issuing certificates. Measured boot provides evidence of what booted — it does not by itself prevent untrusted software from executing.
+
+> For the full technical details see [Integrity Measurement](02-TPM-internals.md#integrity-measurement).
 
 ### Code and document signing
 
@@ -333,7 +335,7 @@ Applications can generate signing keys that live inside the TPM. When a document
 For dictionary-attack-protected objects and authorization entities, the TPM tracks failed authorization attempts. After a configured number of wrong guesses, it restricts further protected authorization attempts until recovery conditions are met. This hardware-enforced rate limiting prevents high-speed guessing attacks that software alone cannot stop. (TPM 2.0 objects with the `noDA` attribute are exempt from this protection.)
 
 
-## Limitations
+## TPM Limitations
 
 A TPM strengthens specific security properties. It is not a complete security solution.
 
